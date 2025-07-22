@@ -59,3 +59,7 @@ echo 'c0566702a79576a24be297049838c1bd0ab77cde1d1eaa1b7df6431959130d578a6956424f
 ### inspiration
 
 https://x.com/rot13maxi/status/1921345826800152907
+
+https://github.com/Ademan/stupid-tap-trick/tree/master
+
+https://x.com/rot13maxi/status/1923087628594794800
