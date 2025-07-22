@@ -1,14 +1,15 @@
 use std::{env, fs, str::FromStr};
 
 use bitcoin::{
-    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
-    XOnlyPublicKey, absolute,
+    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapNodeHash, Transaction, TxIn, TxOut,
+    Txid, XOnlyPublicKey, absolute,
     consensus::{deserialize, serialize},
+    hashes::Hash,
     key::{Keypair, Secp256k1},
     opcodes::all::OP_RETURN,
     script::{Builder, PushBytesBuf},
     secp256k1::SecretKey,
-    taproot::{LeafVersion, TaprootBuilder, TaprootSpendInfo},
+    taproot::{LeafVersion, NodeInfo, TaprootBuilder, TaprootSpendInfo},
     transaction,
 };
 use hex::FromHex;
@@ -37,6 +38,8 @@ async fn main() {
 
     let secp = Secp256k1::new();
 
+    // uncomment this to generate a new private key
+
     // let mut rng = rand::rng();
     // let mut key_bytes = [0u8; 32];
     // rng.fill(&mut key_bytes);
@@ -49,7 +52,7 @@ async fn main() {
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let pubkey = keypair.public_key();
 
-    let spend_info = create_annex_address(pubkey.into()).unwrap();
+    let spend_info = create_control_block_address(pubkey.into()).unwrap();
 
     let address = Address::p2tr_tweaked(spend_info.output_key(), Network::Bitcoin);
 
@@ -125,19 +128,19 @@ async fn main() {
         output: tx_outs,
     };
 
-    let annex_script = annex_script();
+    let op_true_script = op_true_script();
 
-    let annex_hex = fs::read_to_string("annex.hex").expect("annex.hex not found");
-    let annex_bytes: Vec<u8> = Vec::from_hex(annex_hex.split_whitespace().collect::<String>())
-        .expect("invalid hex in annex");
+    // let annex_hex = fs::read_to_string("annex.hex").expect("annex.hex not found");
+    // let annex_bytes: Vec<u8> = Vec::from_hex(annex_hex.split_whitespace().collect::<String>())
+    //     .expect("invalid hex in annex");
 
     for input in unsigned_tx.input.iter_mut() {
-        let script_ver = (annex_script.clone(), LeafVersion::TapScript);
+        let script_ver = (op_true_script.clone(), LeafVersion::TapScript);
         let ctrl_block = spend_info.control_block(&script_ver).unwrap();
 
         input.witness.push(script_ver.0.into_bytes());
         input.witness.push(ctrl_block.serialize());
-        input.witness.push(annex_bytes.clone());
+        // input.witness.push(annex_bytes.clone());
     }
 
     info!("Transaction: {:?}", hex::encode(serialize(&unsigned_tx)));
@@ -148,10 +151,10 @@ pub fn create_annex_address(
 ) -> Result<TaprootSpendInfo, bitcoin::taproot::TaprootBuilderError> {
     let secp = Secp256k1::new();
 
-    let annex_script = annex_script();
+    let script = op_true_script();
 
     let taproot_spend_info = TaprootBuilder::new()
-        .add_leaf(0, annex_script)
+        .add_leaf(0, script)
         .unwrap()
         .finalize(&secp, pubkey.into())
         .unwrap();
@@ -159,6 +162,42 @@ pub fn create_annex_address(
     Ok(taproot_spend_info)
 }
 
-pub fn annex_script() -> ScriptBuf {
+pub fn create_control_block_address(
+    pubkey: XOnlyPublicKey,
+) -> Result<TaprootSpendInfo, bitcoin::taproot::TaprootBuilderError> {
+    let secp = Secp256k1::new();
+    let script = op_true_script();
+
+    let mut root_node = NodeInfo::new_leaf_with_ver(script.clone(), LeafVersion::TapScript);
+
+    let payload_hex = fs::read_to_string("controlblock.hex").expect("controlblock.hex not found");
+    let payload_bytes: Vec<u8> = Vec::from_hex(payload_hex.split_whitespace().collect::<String>())
+        .expect("invalid hex in controlblock");
+
+    let merkle_path = build_merkle_path_from_bytes(&payload_bytes);
+
+    for sibling_hash in &merkle_path {
+        let sibling_node = NodeInfo::new_hidden_node(*sibling_hash);
+        root_node = NodeInfo::combine(root_node, sibling_node)?;
+    }
+
+    let taproot_spend_info = TaprootSpendInfo::from_node_info(&secp, pubkey, root_node);
+
+    Ok(taproot_spend_info)
+}
+
+fn build_merkle_path_from_bytes(bytes: &[u8]) -> Vec<TapNodeHash> {
+    let mut padded = bytes.to_vec();
+    while padded.len() % 32 != 0 {
+        padded.push(0);
+    }
+
+    padded
+        .chunks(32)
+        .map(|chunk| TapNodeHash::from_byte_array(chunk.try_into().unwrap()))
+        .collect()
+}
+
+pub fn op_true_script() -> ScriptBuf {
     Builder::new().push_int(1).into_script()
 }
