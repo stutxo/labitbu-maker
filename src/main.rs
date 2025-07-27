@@ -1,14 +1,15 @@
 use std::{env, fs, str::FromStr};
 
 use bitcoin::{
-    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapNodeHash, Transaction, TxIn, TxOut,
-    Txid, XOnlyPublicKey, absolute,
+    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapLeafHash, TapNodeHash,
+    TapSighashType, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey, absolute,
     consensus::{deserialize, serialize},
     hashes::Hash,
     key::{Keypair, Secp256k1},
-    opcodes::all::OP_RETURN,
-    script::{Builder, PushBytesBuf},
-    secp256k1::SecretKey,
+    opcodes::all::OP_CHECKSIG,
+    script::Builder,
+    secp256k1::{Message, SecretKey},
+    sighash::{Prevouts, SighashCache},
     taproot::{LeafVersion, NodeInfo, TaprootBuilder, TaprootSpendInfo},
     transaction,
 };
@@ -107,18 +108,13 @@ async fn main() {
         prev_txouts.push(tx.output[prevout.vout as usize].clone());
     }
 
-    let tags = ["👹"];
+    let total_amount = utxos.iter().map(|utxo| utxo.value).sum::<u64>();
+    let fee = 1337;
 
     let mut tx_outs = Vec::new();
-    let mut push_bytes = PushBytesBuf::new();
-    push_bytes.extend_from_slice(tags[0].as_bytes()).unwrap();
-    let script = Builder::new()
-        .push_opcode(OP_RETURN)
-        .push_slice(&push_bytes)
-        .into_script();
     tx_outs.push(TxOut {
-        value: Amount::from_sat(0),
-        script_pubkey: script,
+        value: Amount::from_sat(total_amount - fee),
+        script_pubkey: address.script_pubkey(),
     });
 
     let mut unsigned_tx: Transaction = Transaction {
@@ -128,16 +124,32 @@ async fn main() {
         output: tx_outs,
     };
 
-    let op_true_script = op_true_script();
+    let spend_script = spend_script(pubkey.into());
 
     // let annex_hex = fs::read_to_string("annex.hex").expect("annex.hex not found");
     // let annex_bytes: Vec<u8> = Vec::from_hex(annex_hex.split_whitespace().collect::<String>())
     //     .expect("invalid hex in annex");
 
+    let unsigned_tx_clone = unsigned_tx.clone();
+
+    let tap_leaf_hash = TapLeafHash::from_script(&spend_script, LeafVersion::TapScript);
+
     for input in unsigned_tx.input.iter_mut() {
-        let script_ver = (op_true_script.clone(), LeafVersion::TapScript);
+        let sighash = SighashCache::new(&unsigned_tx_clone)
+            .taproot_script_spend_signature_hash(
+                0,
+                &Prevouts::All(&prev_txouts),
+                tap_leaf_hash,
+                TapSighashType::Default,
+            )
+            .expect("failed to construct sighash");
+
+        let message = Message::from(sighash);
+        let sig = secp.sign_schnorr_no_aux_rand(&message, &keypair);
+        let script_ver = (spend_script.clone(), LeafVersion::TapScript);
         let ctrl_block = spend_info.control_block(&script_ver).unwrap();
 
+        input.witness.push(sig.serialize());
         input.witness.push(script_ver.0.into_bytes());
         input.witness.push(ctrl_block.serialize());
         // input.witness.push(annex_bytes.clone());
@@ -151,7 +163,7 @@ pub fn create_annex_address(
 ) -> Result<TaprootSpendInfo, bitcoin::taproot::TaprootBuilderError> {
     let secp = Secp256k1::new();
 
-    let script = op_true_script();
+    let script = spend_script(pubkey);
 
     let taproot_spend_info = TaprootBuilder::new()
         .add_leaf(0, script)
@@ -166,7 +178,7 @@ pub fn create_control_block_address(
     pubkey: XOnlyPublicKey,
 ) -> Result<TaprootSpendInfo, bitcoin::taproot::TaprootBuilderError> {
     let secp = Secp256k1::new();
-    let script = op_true_script();
+    let script = spend_script(pubkey);
 
     let mut root_node = NodeInfo::new_leaf_with_ver(script.clone(), LeafVersion::TapScript);
 
@@ -198,6 +210,9 @@ fn build_merkle_path_from_bytes(bytes: &[u8]) -> Vec<TapNodeHash> {
         .collect()
 }
 
-pub fn op_true_script() -> ScriptBuf {
-    Builder::new().push_int(1).into_script()
+pub fn spend_script(pubkey: XOnlyPublicKey) -> ScriptBuf {
+    Builder::new()
+        .push_x_only_key(&pubkey)
+        .push_opcode(OP_CHECKSIG)
+        .into_script()
 }
