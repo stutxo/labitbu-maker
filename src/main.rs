@@ -1,16 +1,20 @@
-use std::{env, fs, str::FromStr};
+use std::{
+    env::{self},
+    fs,
+    str::FromStr,
+};
 
 use bitcoin::{
     Address, Amount, Network, OutPoint, ScriptBuf, Sequence, TapLeafHash, TapNodeHash,
     TapSighashType, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey, absolute,
     consensus::{deserialize, serialize},
-    hashes::Hash,
+    hashes::{Hash, HashEngine, sha256},
     key::{Keypair, Secp256k1},
     opcodes::all::OP_CHECKSIG,
     script::Builder,
     secp256k1::{Message, SecretKey},
     sighash::{Prevouts, SighashCache},
-    taproot::{LeafVersion, NodeInfo, TaprootBuilder, TaprootSpendInfo},
+    taproot::{LeafVersion, NodeInfo, TaprootSpendInfo},
     transaction,
 };
 use hex::FromHex;
@@ -33,11 +37,32 @@ struct UtxoStatus {
     block_time: Option<u64>,
 }
 
+const TARGET_BYTE_SIZE: usize = 4096;
+const TARGET_HEX_LENGTH: usize = TARGET_BYTE_SIZE * 2;
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_target(false).init();
 
     let secp = Secp256k1::new();
+
+    let mut args = env::args();
+
+    args.next();
+
+    let destination_arg = match args.next() {
+        Some(arg) => arg,
+        None => {
+            eprintln!("Error: Missing destination address.");
+            eprintln!("Usage: target/debug/labitbu_maker <DESTINATION_ADDRESS>");
+            std::process::exit(1);
+        }
+    };
+
+    let destination_address = Address::from_str(&destination_arg)
+        .expect("Invalid destination address provided via CLI")
+        .require_network(Network::Bitcoin)
+        .expect("Destination address is not for the Bitcoin network");
 
     // uncomment this to generate a new private key
 
@@ -53,7 +78,29 @@ async fn main() {
     let keypair = Keypair::from_secret_key(&secp, &secret_key);
     let pubkey = keypair.public_key();
 
-    let spend_info = create_control_block_address(pubkey.into()).unwrap();
+    let payload_bytes = fs::read("labitbu.webp")
+        .expect("Failed to read 'labitbu.webp'. Make sure the file exists.");
+
+    let mut hex_data = hex::encode(payload_bytes).trim().to_string();
+
+    if hex_data.len() < TARGET_HEX_LENGTH {
+        hex_data.extend(std::iter::repeat('0').take(TARGET_HEX_LENGTH - hex_data.len()));
+        info!(
+            "Hex data was shorter than {} characters, padded with '0's.",
+            TARGET_HEX_LENGTH
+        );
+    } else if hex_data.len() > TARGET_HEX_LENGTH {
+        eprintln!(
+            "Error: Input file 'labitbu.webp' is too large. Maximum size is {} bytes.",
+            TARGET_BYTE_SIZE
+        );
+        std::process::exit(1);
+    }
+
+    let payload_bytes = hex::decode(&hex_data)
+        .expect("Failed to decode hex string from file. Ensure it contains valid hex.");
+
+    let spend_info = create_control_block_address(pubkey.into(), payload_bytes).unwrap();
 
     let address = Address::p2tr_tweaked(spend_info.output_key(), Network::Bitcoin);
 
@@ -114,7 +161,7 @@ async fn main() {
     let mut tx_outs = Vec::new();
     tx_outs.push(TxOut {
         value: Amount::from_sat(total_amount - fee),
-        script_pubkey: address.script_pubkey(),
+        script_pubkey: destination_address.script_pubkey(),
     });
 
     let mut unsigned_tx: Transaction = Transaction {
@@ -158,33 +205,34 @@ async fn main() {
     info!("Transaction: {:?}", hex::encode(serialize(&unsigned_tx)));
 }
 
-pub fn create_annex_address(
-    pubkey: XOnlyPublicKey,
-) -> Result<TaprootSpendInfo, bitcoin::taproot::TaprootBuilderError> {
-    let secp = Secp256k1::new();
+// pub fn create_annex_address(
+//     pubkey: XOnlyPublicKey,
+// ) -> Result<TaprootSpendInfo, bitcoin::taproot::TaprootBuilderError> {
+//     let secp = Secp256k1::new();
 
-    let script = spend_script(pubkey);
+//     let script = spend_script(pubkey);
 
-    let taproot_spend_info = TaprootBuilder::new()
-        .add_leaf(0, script)
-        .unwrap()
-        .finalize(&secp, pubkey.into())
-        .unwrap();
+//     let taproot_spend_info = TaprootBuilder::new()
+//         .add_leaf(0, script)
+//         .unwrap()
+//         .finalize(&secp, pubkey.into())
+//         .unwrap();
 
-    Ok(taproot_spend_info)
-}
+//     Ok(taproot_spend_info)
+// }
 
 pub fn create_control_block_address(
     pubkey: XOnlyPublicKey,
+    payload_bytes: Vec<u8>,
 ) -> Result<TaprootSpendInfo, bitcoin::taproot::TaprootBuilderError> {
     let secp = Secp256k1::new();
-    let script = spend_script(pubkey);
 
-    let mut root_node = NodeInfo::new_leaf_with_ver(script.clone(), LeafVersion::TapScript);
+    let spend_script = spend_script(pubkey);
 
-    let payload_hex = fs::read_to_string("controlblock.hex").expect("controlblock.hex not found");
-    let payload_bytes: Vec<u8> = Vec::from_hex(payload_hex.split_whitespace().collect::<String>())
-        .expect("invalid hex in controlblock");
+    // To identify the labitbu collection we use a "Nothing Up My Sleeve" (NUMS) public key. This can not be spent
+    let labitbu_nums = nums_from_tag(b"Labitbu");
+
+    let mut root_node = NodeInfo::new_leaf_with_ver(spend_script.clone(), LeafVersion::TapScript);
 
     let merkle_path = build_merkle_path_from_bytes(&payload_bytes);
 
@@ -193,9 +241,26 @@ pub fn create_control_block_address(
         root_node = NodeInfo::combine(root_node, sibling_node)?;
     }
 
-    let taproot_spend_info = TaprootSpendInfo::from_node_info(&secp, pubkey, root_node);
+    Ok(TaprootSpendInfo::from_node_info(
+        &secp,
+        labitbu_nums,
+        root_node,
+    ))
+}
 
-    Ok(taproot_spend_info)
+fn nums_from_tag(tag: &[u8]) -> XOnlyPublicKey {
+    let mut ctr = 0u32;
+    loop {
+        let mut eng = sha256::Hash::engine();
+        eng.input(tag);
+        eng.input(&ctr.to_le_bytes());
+        let candidate = sha256::Hash::from_engine(eng);
+
+        if let Ok(pk) = XOnlyPublicKey::from_slice(&candidate[..]) {
+            return pk;
+        }
+        ctr += 1;
+    }
 }
 
 fn build_merkle_path_from_bytes(bytes: &[u8]) -> Vec<TapNodeHash> {
