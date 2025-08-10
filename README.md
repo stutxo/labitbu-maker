@@ -1,4 +1,48 @@
-# labitbu Maker
+# Labitbu Maker
+
+This repo is an example of how to create a pathology.
+
+https://github.com/labitbu/pathologies
+
+Pathologies is a fork of `ord` that tracks sats with the following traits (for now). I had to get this up and running quickly to find the sats for the Labitbu collection.
+
+- Starts at block **908,072** (there are earlier pathologies, but this fork just tracks Labitbu pathologies for now)  
+- **128-depth** control block data (**4096 bytes**) — this payload appears **after** the `<controlbytes><internalkey>` portion of the control block.  
+- Internal key with Labitbu ID (NUMS public key):  
+  `96053db5b18967b5a410326ecca687441579225a6d190f398e2180deec6e429e`
+
+You can find the full Labitbu sats index here (or ask me directly). I will have a repo open soon with more info:
+
+https://mempool.space/tx/f08fd61d48f79eeb0c4bc9e58f2d7ecad0e20e5d6411b588590cb0480c8e7fbe
+
+---
+
+https://learnmeabitcoin.com/technical/upgrades/taproot/#script-path-spend-control-block
+
+## How it works
+
+This is inspired by Ademan's [stupid-tap-trick](https://github.com/Ademan/stupid-tap-trick/tree/master).
+
+We entered this as a project for the latest 2025 Miami PlebFi hackathon and everything got a bit out of *control block* since then.
+
+1. **Internal key**  
+   Use a SHA-256 hash of `Labitbu` (with a counter) as the internal key.  
+   This is a **NUMS key** (Nothing Up My Sleeve) and is provably unspendable:  
+   https://nums-secp256k1.jaonoctus.dev/?pk=96053db5b18967b5a410326ecca687441579225a6d190f398e2180deec6e429e&method=TAGGED_HASH_KEY&input=Labitbu
+
+2. **Merkle path payload**  
+   Add the WebP image bytes to the Merkle path by splitting them into **32-byte chunks**, 128 times (4096 bytes total).  
+   Each chunk is inserted as a sibling hash in the Merkle tree.  
+   *Max depth is 128 — this is a Taproot consensus limit.*
+
+3. **Spending**  
+   Add one tapscript leaf spend that is revealed when spending the transaction via the **script path**.  
+   (Key path spend is not possible due to the NUMS key.)  
+   This spend reveals the control block, which contains the internal key and all the sibling hashes — i.e., the embedded WebP data.
+
+4. **Tracking**
+   For this metaprotocol, we track the assets the same was as inscriptions, with ordinal theory. via my fork of ord - https://github.com/labitbu/pathologies
+
 
 ### create transaction
 
