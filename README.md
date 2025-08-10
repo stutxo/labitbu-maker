@@ -26,7 +26,7 @@ This is inspired by Ademan's [stupid-tap-trick](https://github.com/Ademan/stupid
 We entered this as a project for the latest 2025 Miami PlebFi hackathon and everything got a bit out of *control block* since then.
 
 1. **Internal key**  
-   Use a SHA-256 hash of `Labitbu` (with a counter) as the internal key.  
+   Use a SHA-256 hash of `Labitbu` as the internal key.  
    This is a **NUMS key** (Nothing Up My Sleeve) and is provably unspendable:  
    https://nums-secp256k1.jaonoctus.dev/?pk=96053db5b18967b5a410326ecca687441579225a6d190f398e2180deec6e429e&method=TAGGED_HASH_KEY&input=Labitbu
 
